@@ -15,8 +15,11 @@ def _clip(value: object, limit: int) -> str:
 
 
 class _CourseAgent(BaseAgent):
-    def __init__(self, name: str, language: str = "en") -> None:
-        super().__init__(module_name="course", agent_name=name, language=language)
+    def __init__(self, name: str | None = None, language: str = "en") -> None:
+        # Concrete course agents are instantiated directly by the engine; use
+        # their class name as the stable agent identity unless explicitly set.
+        agent_name = name or self.__class__.__name__.removesuffix("Agent").lower()
+        super().__init__(module_name="book", agent_name=agent_name, language=language)
 
     async def json(self, system: str, prompt: str) -> dict[str, Any]:
         chunks: list[str] = []
