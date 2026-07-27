@@ -42,6 +42,7 @@ export interface CourseClass {
   id: string; course_id: string; title: string; summary: string; order: number;
   status: ClassStatus; learning_objectives: string[]; knowledge_points: Array<{name: string; type: string}>;
   prerequisite_ids: string[]; resource_ids: string[]; book_ids: string[];
+  content_status: "pending" | "generating" | "ready" | "error" | string; content_error: string;
   tutorials: Tutorial[]; assignments: Assignment[]; notes: string; project: ClassProject;
   chat_session_id: string; updated_at: number;
 }

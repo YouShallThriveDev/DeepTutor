@@ -172,6 +172,28 @@ async def course_websocket(ws: WebSocket) -> None:
                         "course": course.model_dump(mode="json"),
                         "outline": outline.model_dump(mode="json"),
                     })
+                elif action == "confirm_outline":
+                    outline = CourseOutline.model_validate(data["outline"]) if data.get("outline") else None
+                    classes = await get_course_engine().confirm_outline(str(data.get("course_id") or ""), outline)
+                    await ws.send_json({
+                        "type": "confirm_outline_result",
+                        "classes": [item.model_dump(mode="json") for item in classes],
+                    })
+                elif action == "compile_class":
+                    item = await get_course_engine().compile_class(
+                        str(data.get("course_id") or ""), str(data.get("class_id") or "")
+                    )
+                    await ws.send_json({"type": "compile_class_result", "class": item.model_dump(mode="json")})
+                elif action == "regenerate_outline":
+                    proposal = CourseProposal.model_validate(data["proposal"]) if data.get("proposal") else None
+                    course, outline = await get_course_engine().regenerate_outline(
+                        str(data.get("course_id") or ""), proposal
+                    )
+                    await ws.send_json({
+                        "type": "regenerate_outline_result",
+                        "course": course.model_dump(mode="json"),
+                        "outline": outline.model_dump(mode="json"),
+                    })
                 else:
                     await ws.send_json({"type": "error", "content": f"Unknown message type: {action}"})
             except Exception as exc:

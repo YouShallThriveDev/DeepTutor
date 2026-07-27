@@ -74,6 +74,15 @@ class CourseStorage:
     def load_outline(self, course_id: str) -> CourseOutline | None:
         return _read(self._path(course_id, "outline.json"), CourseOutline)
 
+    def clear_classes(self, course_id: str) -> None:
+        directory = self._path(course_id, "classes")
+        if directory.exists():
+            shutil.rmtree(directory, ignore_errors=True)
+        directory.mkdir(parents=True, exist_ok=True)
+
+    def delete_outline(self, course_id: str) -> None:
+        self._path(course_id, "outline.json").unlink(missing_ok=True)
+
     def save_progress(self, value: CourseProgress) -> None:
         self.ensure(value.course_id)
         _write(self._path(value.course_id, "progress.json"), value)

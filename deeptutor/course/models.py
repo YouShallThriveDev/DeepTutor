@@ -165,6 +165,9 @@ class CourseClass(BaseModel):
     prerequisite_ids: list[str] = Field(default_factory=list)
     resource_ids: list[str] = Field(default_factory=list)
     book_ids: list[str] = Field(default_factory=list)
+    # Content is compiled from the approved plan on first availability, never filled with generic shells.
+    content_status: str = "pending"  # pending | generating | ready | error
+    content_error: str = ""
     tutorials: list[Tutorial] = Field(default_factory=list)
     assignments: list[Assignment] = Field(default_factory=list)
     notes: str = ""

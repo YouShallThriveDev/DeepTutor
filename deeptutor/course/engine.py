@@ -1,4 +1,4 @@
-"""Course lifecycle: research -> proposal -> editable outline -> class workspaces."""
+"""Course lifecycle: research -> validated outline -> compiled class workspaces."""
 from __future__ import annotations
 
 import asyncio
@@ -10,14 +10,19 @@ from deeptutor.learning.models import KnowledgePoint, KnowledgeType, LearningMod
 from deeptutor.learning.service import LearningService
 from deeptutor.tools.web_fetch import fetch_url_as_markdown
 
-from .agents import CourseIdeationAgent, CoursePlannerAgent, CourseResearchAgent
+from .agents import (
+    CourseClassCompilerAgent,
+    CourseIdeationAgent,
+    CoursePlannerAgent,
+    CourseResearchAgent,
+)
 from .models import (
     Assignment,
-    AssignmentStatus,
     ClassProject,
     ClassStatus,
     Course,
     CourseClass,
+    CourseClassPlan,
     CourseInputs,
     CourseOutline,
     CourseProgress,
@@ -104,22 +109,37 @@ class CourseEngine:
         approved = course.proposal or proposal
         if not approved:
             raise ValueError("Course proposal is missing")
-        outline = await CoursePlannerAgent(language=course.language).process(
-            course.id, approved, inputs.research_brief, [item.id for item in course.resource_links]
-        )
+        try:
+            outline = await CoursePlannerAgent(language=course.language).process(
+                course.id, approved, inputs.research_brief, [item.id for item in course.resource_links]
+            )
+        except Exception as exc:
+            # Crucially, do not turn an LLM failure into generic classes.
+            course.status = CourseStatus.DRAFT
+            course.updated_at = time.time()
+            self.storage.save_course(course)
+            self.storage.append_log(course.id, f"outline rejected: {exc}")
+            raise
         course.status = CourseStatus.OUTLINE_READY
         course.class_count = len(outline.classes)
         course.updated_at = time.time()
         self.storage.save_course(course)
         self.storage.save_outline(outline)
-        self.storage.append_log(course.id, "proposal confirmed; class outline generated")
+        self.storage.append_log(course.id, "proposal confirmed; validated class outline generated")
         return course, outline
 
     async def confirm_outline(self, course_id: str, outline: CourseOutline | None = None) -> list[CourseClass]:
+        """Create plan-specific class records and compile the first available class.
+
+        Later classes keep their approved unique plans but are compiled only when
+        the learner opens them, preventing a long course from becoming a batch
+        of generic shells and keeping creation responsive.
+        """
         async with self._lock:
             course = self.storage.load_course(course_id)
+            inputs = self.storage.load_inputs(course_id)
             final = outline or self.storage.load_outline(course_id)
-            if not course or not final:
+            if not course or not inputs or not final or not final.classes:
                 raise ValueError("Course outline not found")
             final.course_id = course_id
             id_by_title = {item.title.lower(): item.id for item in final.classes}
@@ -127,46 +147,21 @@ class CourseEngine:
             for index, plan in enumerate(final.classes):
                 plan.order = index
                 prereq_ids = [id_by_title.get(value.lower(), value) for value in plan.prerequisites]
-                tutorials = [
-                    Tutorial(
-                        title=title,
-                        content=(
-                            f"## {title}\n\nThis interactive tutorial belongs to **{plan.title}**. "
-                            "Open the class tutor to explore the material, ask for examples, and check your understanding."
-                        ),
-                    )
-                    for title in (plan.tutorial_titles or ["Guided tutorial"])
-                ]
-                assignments = [
-                    Assignment(
-                        title=title,
-                        prompt=f"Complete the practical work for: {title}.",
-                        deliverable="A concise explanation, artifact, or implementation demonstrating the objective.",
-                        rubric=["Addresses the learning objective", "Shows reasoning", "Reflects on what was learned"],
-                    )
-                    for title in (plan.assignment_titles or ["Practice assignment"])
-                ]
-                item = CourseClass(
-                    id=plan.id,
-                    course_id=course_id,
-                    title=plan.title,
-                    summary=plan.summary,
-                    order=index,
-                    status=ClassStatus.NEXT if index == 0 and not prereq_ids else ClassStatus.LOCKED,
-                    learning_objectives=plan.learning_objectives,
-                    knowledge_points=plan.knowledge_points,
-                    prerequisite_ids=prereq_ids,
-                    resource_ids=plan.resource_ids,
-                    tutorials=tutorials,
-                    assignments=assignments,
-                    project=ClassProject(
-                        title=plan.project_title or f"{plan.title} project",
-                        brief=f"Build a small project that applies the objectives from {plan.title}.",
-                        milestones=["Plan", "Build", "Reflect"],
-                        success_criteria=["Uses the class objectives", "Explains design choices"],
-                    ),
-                )
-                classes.append(item)
+                classes.append(self._class_from_plan(course_id, plan, index, prereq_ids))
+
+            # The first class must be a real workspace before a course can be
+            # marked ready. No fabricated tutorial/assignment/project content.
+            first = classes[0]
+            first.content_status = "generating"
+            tutorials, assignments, project = await self._compile_plan(course, inputs, final.classes[0])
+            first.tutorials = tutorials
+            first.assignments = assignments
+            first.project = project
+            first.content_status = "ready"
+            first.content_error = ""
+
+            self.storage.clear_classes(course_id)
+            for item in classes:
                 self.storage.save_class(item)
             self.storage.save_outline(final)
             self._sync_learning_path(course_id, classes)
@@ -174,8 +169,85 @@ class CourseEngine:
             course.class_count = len(classes)
             course.updated_at = time.time()
             self.storage.save_course(course)
-            self.storage.append_log(course_id, f"outline confirmed; {len(classes)} class workspaces created")
+            self.storage.append_log(course_id, f"outline confirmed; {len(classes)} distinct class plans created; first class compiled")
             return classes
+
+    async def compile_class(self, course_id: str, class_id: str) -> CourseClass:
+        """Generate the openable learning artifacts for an approved class."""
+        async with self._lock:
+            course = self.storage.load_course(course_id)
+            inputs = self.storage.load_inputs(course_id)
+            outline = self.storage.load_outline(course_id)
+            item = self.storage.load_class(course_id, class_id)
+            if not course or not inputs or not outline or not item:
+                raise ValueError("Class not found")
+            if item.content_status == "ready":
+                return item
+            plan = next((value for value in outline.classes if value.id == class_id), None)
+            if not plan:
+                raise ValueError("Class plan not found")
+            item.content_status = "generating"
+            item.content_error = ""
+            item.updated_at = time.time()
+            self.storage.save_class(item)
+            try:
+                tutorials, assignments, project = await self._compile_plan(course, inputs, plan)
+            except Exception as exc:
+                item.content_status = "error"
+                item.content_error = str(exc)
+                item.updated_at = time.time()
+                self.storage.save_class(item)
+                self.storage.append_log(course_id, f"class compiler rejected {class_id}: {exc}")
+                raise
+            item.tutorials = tutorials
+            item.assignments = assignments
+            item.project = project
+            item.content_status = "ready"
+            item.content_error = ""
+            item.updated_at = time.time()
+            self.storage.save_class(item)
+            self.storage.append_log(course_id, f"class compiled: {item.title}")
+            return item
+
+    async def regenerate_outline(self, course_id: str, proposal: CourseProposal | None = None) -> tuple[Course, CourseOutline]:
+        """Discard invalid/generated classes while preserving proposal, sources, and inputs."""
+        async with self._lock:
+            course = self.storage.load_course(course_id)
+            if not course:
+                raise ValueError("Course not found")
+            self.storage.clear_classes(course_id)
+            self.storage.delete_outline(course_id)
+            course.status = CourseStatus.DRAFT
+            course.class_count = 0
+            course.completed_class_count = 0
+            course.updated_at = time.time()
+            self.storage.save_course(course)
+            self.storage.save_progress(CourseProgress(course_id=course_id))
+            self.storage.append_log(course_id, "course reset for outline regeneration; source research preserved")
+        return await self.confirm_proposal(course_id, proposal)
+
+    @staticmethod
+    def _class_from_plan(course_id: str, plan: CourseClassPlan, index: int, prereq_ids: list[str]) -> CourseClass:
+        return CourseClass(
+            id=plan.id,
+            course_id=course_id,
+            title=plan.title,
+            summary=plan.summary,
+            order=index,
+            status=ClassStatus.NEXT if index == 0 and not prereq_ids else ClassStatus.LOCKED,
+            learning_objectives=plan.learning_objectives,
+            knowledge_points=plan.knowledge_points,
+            prerequisite_ids=prereq_ids,
+            resource_ids=plan.resource_ids,
+            content_status="pending",
+            # These values only surface while the compiler runs; they are not
+            # user-facing generic artifacts.
+            project=ClassProject(title=plan.project_title),
+        )
+
+    async def _compile_plan(self, course: Course, inputs: CourseInputs, plan: CourseClassPlan) -> tuple[list[Tutorial], list[Assignment], ClassProject]:
+        evidence = self._resource_evidence([link for link in course.resource_links if link.id in plan.resource_ids])
+        return await CourseClassCompilerAgent(language=course.language).process(course.proposal or CourseProposal(), plan, evidence or inputs.research_brief)
 
     def update_class(self, course_id: str, class_id: str, patch: dict[str, Any]) -> CourseClass:
         item = self.storage.load_class(course_id, class_id)
@@ -250,12 +322,7 @@ class CourseEngine:
                     kind = KnowledgeType(str(raw.get("type") or "concept").lower())
                 except ValueError:
                     kind = KnowledgeType.CONCEPT
-                points.append(KnowledgePoint(
-                    id=f"{course_id}_{item.id}_kp{index}",
-                    name=str(raw.get("name") or f"Objective {index + 1}"),
-                    type=kind,
-                    module_id=item.id,
-                ))
+                points.append(KnowledgePoint(id=f"{course_id}_{item.id}_kp{index}", name=str(raw.get("name") or f"Objective {index + 1}"), type=kind, module_id=item.id))
             if points:
                 modules.append(LearningModule(id=item.id, name=item.title, order=item.order, knowledge_points=points))
         if modules:

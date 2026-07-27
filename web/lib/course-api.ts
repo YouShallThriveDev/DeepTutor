@@ -27,7 +27,9 @@ export const courseApi = {
   get: (id: string) => request<CourseDetail>(`/courses/${encodeURIComponent(id)}`),
   create: (payload: CreateCoursePayload) => socketOperation<{type: "create_result"; course: Course; proposal: CourseProposal; research_brief: string; resource_links: ResourceLink[]}>({ type: "create", ...payload }, "create_result"),
   confirmProposal: (id: string, proposal?: CourseProposal) => socketOperation<{type: "confirm_proposal_result"; course: Course; outline: CourseOutline}>({ type: "confirm_proposal", course_id: id, proposal: proposal || null }, "confirm_proposal_result"),
-  confirmOutline: (id: string, outline?: CourseOutline) => request<{classes: CourseClass[]}>(`/courses/${encodeURIComponent(id)}/confirm-outline`, { method: "POST", body: JSON.stringify({outline: outline || null}) }),
+  confirmOutline: (id: string, outline?: CourseOutline) => socketOperation<{type: "confirm_outline_result"; classes: CourseClass[]}>({ type: "confirm_outline", course_id: id, outline: outline || null }, "confirm_outline_result"),
+  compileClass: (courseId: string, classId: string) => socketOperation<{type: "compile_class_result"; class: CourseClass}>({ type: "compile_class", course_id: courseId, class_id: classId }, "compile_class_result"),
+  regenerateOutline: (id: string, proposal?: CourseProposal) => socketOperation<{type: "regenerate_outline_result"; course: Course; outline: CourseOutline}>({ type: "regenerate_outline", course_id: id, proposal: proposal || null }, "regenerate_outline_result"),
   patchClass: (courseId: string, classId: string, patch: Record<string, unknown>) => request<{class: CourseClass}>(`/courses/${encodeURIComponent(courseId)}/classes/${encodeURIComponent(classId)}`, { method: "PATCH", body: JSON.stringify({patch}) }),
   remove: (id: string) => request<{deleted: boolean}>(`/courses/${encodeURIComponent(id)}`, { method: "DELETE" }),
 };
