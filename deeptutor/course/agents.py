@@ -1,6 +1,7 @@
 """LLM agents for robust course planning and per-class content compilation."""
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -247,7 +248,10 @@ class CourseClassCompilerAgent(_CourseAgent):
     def _parse_compiler_payload(cleaned: str, raw: str, *, expected_key: str) -> dict[str, Any]:
         for candidate in (cleaned, raw):
             for value in (candidate, _escape_invalid_json_backslashes(candidate)):
-                data = parse_json_response(value, fallback={})
+                try:
+                    data = json.loads(value)
+                except (json.JSONDecodeError, TypeError):
+                    data = parse_json_response(value, fallback={})
                 if isinstance(data, dict) and data.get(expected_key):
                     return data
         return {}
