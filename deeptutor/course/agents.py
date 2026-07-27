@@ -243,8 +243,8 @@ class CourseClassCompilerAgent(_CourseAgent):
 
     async def _enriched_tutorial(self, title: str, context: str) -> Tutorial | None:
         data = await self._compiler_json(
-            "Create exactly ONE detailed, learner-facing hands-on tutorial. Output JSON {tutorial:{title,content,estimated_minutes}}. The markdown content must include orientation, numbered implementation steps, concrete example, check-for-understanding, and next action. Write the tutorial itself, not a plan.",
-            f"Requested tutorial title: {title}\n\n{context}",
+            "Return only a JSON object. Top-level key: tutorial. tutorial has title, content, estimated_minutes. Content must be markdown over 500 characters with orientation, numbered steps, concrete example, self-check, and next action.",
+            f"Tutorial title: {title}\n{context}",
             expected_key="tutorial",
             max_tokens=3600,
         )
@@ -253,8 +253,8 @@ class CourseClassCompilerAgent(_CourseAgent):
 
     async def _enriched_assignment(self, title: str, context: str) -> Assignment | None:
         data = await self._compiler_json(
-            "Create exactly ONE practical assignment. Output JSON {assignment:{title,prompt,deliverable,rubric}}. The prompt must be a realistic scoped scenario with constraints; deliverable must be concrete; rubric must contain 3-5 measurable items.",
-            f"Requested assignment title: {title}\n\n{context}",
+            "Return only a JSON object. Top-level key: assignment. assignment has title, prompt, deliverable, rubric. Prompt must be a realistic scoped scenario with constraints; deliverable must be concrete; rubric must contain 3-5 measurable items.",
+            f"Assignment title: {title}\n{context}",
             expected_key="assignment",
             max_tokens=3000,
         )
@@ -263,8 +263,8 @@ class CourseClassCompilerAgent(_CourseAgent):
 
     async def _enriched_project(self, title: str, context: str) -> ClassProject | None:
         data = await self._compiler_json(
-            "Create exactly ONE class project. Output JSON {project:{title,brief,milestones,success_criteria}}. The project must advance the course capstone, include 3-6 concrete milestones, and at least 3 measurable success criteria.",
-            f"Requested project title: {title}\n\n{context}",
+            "Return only a JSON object. Top-level key: project. project has title, brief, milestones, success_criteria. The project must advance the course capstone, include 3-6 concrete milestones, and at least 3 measurable success criteria.",
+            f"Project title: {title}\n{context}",
             expected_key="project",
             max_tokens=3000,
         )
@@ -272,12 +272,17 @@ class CourseClassCompilerAgent(_CourseAgent):
 
     @staticmethod
     def _artifact_context(proposal: CourseProposal, plan: CourseClassPlan, resource_evidence: str) -> str:
+        objectives = "; ".join(plan.learning_objectives[:4]) or "Demonstrate the class outcome"
+        points = ", ".join(str(point.get("name") or "") for point in plan.knowledge_points[:5] if isinstance(point, dict))
+        excerpt = _clip(resource_evidence, 1200)
         return (
-            f"Course: {proposal.title}\nCapstone: {proposal.capstone_title}\n"
-            f"Class: {plan.title}\nSummary: {plan.summary}\n"
-            f"Learning objectives: {plan.learning_objectives}\n"
-            f"Knowledge points: {plan.knowledge_points}\n"
-            f"Relevant researched resource excerpts:\n{_clip(resource_evidence, 4000) or '(No matching custom resource excerpts.)'}"
+            f"Course: {proposal.title}\n"
+            f"Capstone: {proposal.capstone_title or plan.project_title}\n"
+            f"Class: {plan.title}\n"
+            f"Summary: {plan.summary}\n"
+            f"Objectives: {objectives}\n"
+            f"Knowledge points: {points or 'none specified'}\n"
+            f"Reference excerpt: {excerpt or 'none'}"
         )
 
     @staticmethod
