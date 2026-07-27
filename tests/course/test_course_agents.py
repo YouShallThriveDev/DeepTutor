@@ -32,6 +32,7 @@ async def test_planner_requires_distinct_complete_class_plans():
 @pytest.mark.asyncio
 async def test_compiler_materialises_distinct_workspaces_without_waiting_for_llm_json():
     agent = CourseClassCompilerAgent()
+    agent._compiler_json = AsyncMock(return_value={})
     plan = CourseClassPlan(
         title="Project setup",
         summary="Set up a Laravel, Inertia, and Vue application with a verified local workflow.",
@@ -50,3 +51,30 @@ async def test_compiler_materialises_distinct_workspaces_without_waiting_for_llm
     assert assignments[0].rubric and len(assignments[0].rubric) >= 3
     assert len(project.milestones) >= 3
     assert "Project manager" in project.brief
+
+
+@pytest.mark.asyncio
+async def test_compiler_uses_valid_grok_enrichment_over_baseline():
+    agent = CourseClassCompilerAgent()
+    rich = "# Rich tutorial\n\n" + ("Follow these Laravel and Vue steps carefully, verify the behavior, and explain the trade-off. " * 8)
+    agent._compiler_json = AsyncMock(side_effect=[
+        {"tutorial": {"title": "Bootstrap Laravel with Inertia", "content": rich, "estimated_minutes": 45}},
+        {"tutorial": {"title": "Configure a local database", "content": rich, "estimated_minutes": 35}},
+        {"assignment": {"title": "Create the project skeleton", "prompt": "Build a Laravel, Inertia, and Vue skeleton with explicit setup constraints and document how you verified the local workflow.", "deliverable": "A runnable skeleton plus verification notes and a short explanation of decisions.", "rubric": ["Runs locally", "Uses Inertia and Vue", "Verification is documented"]}},
+        {"project": {"title": "Project management foundation", "brief": "Create the foundational project-management application shell with a verified local development workflow and a clear path to the capstone.", "milestones": ["Install dependencies", "Render an Inertia page", "Verify SQLite"], "success_criteria": ["App runs", "Page renders", "Database connects"]}},
+    ])
+    plan = CourseClassPlan(
+        title="Project setup",
+        summary="Set up a Laravel, Inertia, and Vue application with a verified local workflow.",
+        learning_objectives=["Create the application skeleton", "Verify the local development workflow"],
+        tutorial_titles=["Bootstrap Laravel with Inertia", "Configure a local database"],
+        assignment_titles=["Create the project skeleton"],
+        project_title="Project management foundation",
+    )
+
+    tutorials, assignments, project = await agent.process(CourseProposal(title="Laravel and Vue"), plan, "")
+
+    assert tutorials[0].estimated_minutes == 45
+    assert tutorials[0].content.startswith("# Rich tutorial")
+    assert assignments[0].prompt.startswith("Build a Laravel")
+    assert project.brief.startswith("Create the foundational")

@@ -1,11 +1,22 @@
 """LLM agents for robust course planning and per-class content compilation."""
 from __future__ import annotations
 
+import logging
+import os
 from typing import Any
 
 from deeptutor.book.blocks._llm_writer import llm_json
+from deeptutor.services.llm import clean_thinking_tags, complete as llm_complete, get_llm_config, get_token_limit_kwargs
+from deeptutor.services.prompt.language import append_language_directive
+from deeptutor.utils.json_parser import parse_json_response
 
 from .models import Assignment, ClassProject, CourseClassPlan, CourseOutline, CourseProposal, Tutorial
+
+
+logger = logging.getLogger(__name__)
+COURSE_COMPILER_MODEL = os.getenv("DEEPTUTOR_COURSE_COMPILER_MODEL", "x-ai/grok-4.5")
+COURSE_COMPILER_BINDING = os.getenv("DEEPTUTOR_COURSE_COMPILER_BINDING", "openrouter")
+COURSE_COMPILER_REASONING_EFFORT = os.getenv("DEEPTUTOR_COURSE_COMPILER_REASONING_EFFORT", "low")
 
 
 class CourseGenerationError(ValueError):
@@ -172,18 +183,155 @@ class CourseClassCompilerAgent(_CourseAgent):
         plan: CourseClassPlan,
         resource_evidence: str,
     ) -> tuple[list[Tutorial], list[Assignment], ClassProject]:
-        """Materialise the approved plan without making a class depend on LLM JSON.
+        """Materialise the approved plan, then enrich sequentially with Grok.
 
-        The plan itself is LLM/research informed and validated before it reaches
-        this point. Rendering it deterministically gives the learner an
-        immediately usable, distinct workspace even when the configured model
-        is unavailable, slow, or emits malformed structured output. The class
-        tutor remains the model-driven path for explanation and feedback.
+        Deterministic artifacts are created first, so class creation cannot fail
+        because a model emits malformed JSON. Grok 4.5 is then asked for one
+        artifact at a time with low reasoning effort; each valid artifact
+        replaces its baseline independently.
         """
         tutorials = [self._structured_tutorial(title, plan, index) for index, title in enumerate(plan.tutorial_titles)]
         assignments = [self._structured_assignment(title, proposal, plan) for title in plan.assignment_titles]
         project = self._structured_project(proposal, plan)
+        context = self._artifact_context(proposal, plan, resource_evidence)
+
+        for index, title in enumerate(plan.tutorial_titles):
+            enriched = await self._enriched_tutorial(title, context)
+            if enriched is not None:
+                tutorials[index] = enriched
+        for index, title in enumerate(plan.assignment_titles):
+            enriched = await self._enriched_assignment(title, context)
+            if enriched is not None:
+                assignments[index] = enriched
+        enriched_project = await self._enriched_project(plan.project_title, context)
+        if enriched_project is not None:
+            project = enriched_project
         return tutorials, assignments, project
+
+    async def _compiler_json(self, system: str, prompt: str, *, expected_key: str, max_tokens: int) -> dict[str, Any]:
+        config = get_llm_config()
+        binding = COURSE_COMPILER_BINDING
+        model = COURSE_COMPILER_MODEL
+        base_url = os.getenv("DEEPTUTOR_COURSE_COMPILER_BASE_URL") or config.base_url
+        system = append_language_directive(system, self.language)
+        kwargs: dict[str, Any] = {
+            "temperature": 0.25,
+            "response_format": {"type": "json_object"},
+            "reasoning_effort": COURSE_COMPILER_REASONING_EFFORT,
+        }
+        kwargs.update(get_token_limit_kwargs(model, max_tokens))
+        try:
+            raw = await llm_complete(
+                prompt=prompt,
+                system_prompt=system,
+                model=model,
+                api_key=config.api_key,
+                base_url=base_url,
+                api_version=getattr(config, "api_version", None),
+                binding=binding,
+                **kwargs,
+            )
+        except Exception as exc:
+            logger.warning("Course compiler %s call failed: %s", model, exc)
+            return {}
+        cleaned = clean_thinking_tags(raw, binding, model).strip()
+        data = parse_json_response(cleaned, fallback={})
+        if isinstance(data, dict) and data.get(expected_key):
+            return data
+        recovered = parse_json_response(raw, fallback={})
+        return recovered if isinstance(recovered, dict) else {}
+
+    async def _enriched_tutorial(self, title: str, context: str) -> Tutorial | None:
+        data = await self._compiler_json(
+            "Create exactly ONE detailed, learner-facing hands-on tutorial. Output JSON {tutorial:{title,content,estimated_minutes}}. The markdown content must include orientation, numbered implementation steps, concrete example, check-for-understanding, and next action. Write the tutorial itself, not a plan.",
+            f"Requested tutorial title: {title}\n\n{context}",
+            expected_key="tutorial",
+            max_tokens=3600,
+        )
+        artifacts = self._tutorials({"tutorials": [data.get("tutorial")]}, [title])
+        return artifacts[0] if artifacts else None
+
+    async def _enriched_assignment(self, title: str, context: str) -> Assignment | None:
+        data = await self._compiler_json(
+            "Create exactly ONE practical assignment. Output JSON {assignment:{title,prompt,deliverable,rubric}}. The prompt must be a realistic scoped scenario with constraints; deliverable must be concrete; rubric must contain 3-5 measurable items.",
+            f"Requested assignment title: {title}\n\n{context}",
+            expected_key="assignment",
+            max_tokens=3000,
+        )
+        artifacts = self._assignments({"assignments": [data.get("assignment")]}, [title])
+        return artifacts[0] if artifacts else None
+
+    async def _enriched_project(self, title: str, context: str) -> ClassProject | None:
+        data = await self._compiler_json(
+            "Create exactly ONE class project. Output JSON {project:{title,brief,milestones,success_criteria}}. The project must advance the course capstone, include 3-6 concrete milestones, and at least 3 measurable success criteria.",
+            f"Requested project title: {title}\n\n{context}",
+            expected_key="project",
+            max_tokens=3000,
+        )
+        return self._project(data, title)
+
+    @staticmethod
+    def _artifact_context(proposal: CourseProposal, plan: CourseClassPlan, resource_evidence: str) -> str:
+        return (
+            f"Course: {proposal.title}\nCapstone: {proposal.capstone_title}\n"
+            f"Class: {plan.title}\nSummary: {plan.summary}\n"
+            f"Learning objectives: {plan.learning_objectives}\n"
+            f"Knowledge points: {plan.knowledge_points}\n"
+            f"Relevant researched resource excerpts:\n{_clip(resource_evidence, 4000) or '(No matching custom resource excerpts.)'}"
+        )
+
+    @staticmethod
+    def _tutorials(data: dict[str, Any], requested_titles: list[str]) -> list[Tutorial]:
+        raw_items = data.get("tutorials") if isinstance(data.get("tutorials"), list) else []
+        tutorials: list[Tutorial] = []
+        remaining = [item for item in raw_items if isinstance(item, dict)]
+        for requested_title in requested_titles:
+            match = next((index for index, item in enumerate(remaining) if _clip(item.get("title"), 160).casefold() == requested_title.casefold()), 0)
+            if not remaining:
+                break
+            raw = remaining.pop(match)
+            content = _clip(raw.get("content"), 10000)
+            title = _clip(raw.get("title") or requested_title, 160)
+            if len(content) < 300 or not title:
+                continue
+            try:
+                minutes = max(5, min(180, int(raw.get("estimated_minutes", 25))))
+            except (TypeError, ValueError):
+                minutes = 25
+            tutorials.append(Tutorial(title=title, content=content, estimated_minutes=minutes))
+        return tutorials
+
+    @staticmethod
+    def _assignments(data: dict[str, Any], requested_titles: list[str]) -> list[Assignment]:
+        raw_items = data.get("assignments") if isinstance(data.get("assignments"), list) else []
+        assignments: list[Assignment] = []
+        remaining = [item for item in raw_items if isinstance(item, dict)]
+        for requested_title in requested_titles:
+            match = next((index for index, item in enumerate(remaining) if _clip(item.get("title"), 160).casefold() == requested_title.casefold()), 0)
+            if not remaining:
+                break
+            raw = remaining.pop(match)
+            title = _clip(raw.get("title") or requested_title, 160)
+            prompt = _clip(raw.get("prompt"), 8000)
+            deliverable = _clip(raw.get("deliverable"), 2000)
+            rubric = _strings(raw.get("rubric"), limit=5, item_limit=350)
+            if not title or len(prompt) < 80 or len(deliverable) < 30 or len(rubric) < 3:
+                continue
+            assignments.append(Assignment(title=title, prompt=prompt, deliverable=deliverable, rubric=rubric))
+        return assignments
+
+    @staticmethod
+    def _project(data: dict[str, Any], requested_title: str) -> ClassProject | None:
+        raw = data.get("project") if isinstance(data.get("project"), dict) else {}
+        project = ClassProject(
+            title=_clip(raw.get("title") or requested_title, 160),
+            brief=_clip(raw.get("brief"), 5000),
+            milestones=_strings(raw.get("milestones"), limit=6, item_limit=350),
+            success_criteria=_strings(raw.get("success_criteria"), limit=6, item_limit=350),
+        )
+        if len(project.brief) < 80 or len(project.milestones) < 3 or len(project.success_criteria) < 3:
+            return None
+        return project
 
     @staticmethod
     def _structured_tutorial(title: str, plan: CourseClassPlan, index: int) -> Tutorial:
