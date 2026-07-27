@@ -172,108 +172,92 @@ class CourseClassCompilerAgent(_CourseAgent):
         plan: CourseClassPlan,
         resource_evidence: str,
     ) -> tuple[list[Tutorial], list[Assignment], ClassProject]:
-        """Compile artifacts independently so one response cannot truncate a class."""
-        context = self._artifact_context(proposal, plan, resource_evidence)
-        tutorials: list[Tutorial] = []
-        for title in plan.tutorial_titles:
-            data = await self.json(
-                "Create exactly ONE detailed, learner-facing hands-on tutorial. Output JSON {tutorial:{title,content,estimated_minutes}}. "
-                "The markdown content must be specific to the requested tutorial and include an orientation, numbered implementation steps, a concrete example, a check-for-understanding, and a next action. "
-                "Write useful instructional content, not a plan for writing it. Treat supplied sources only as reference.",
-                f"Requested tutorial title: {title}\n\n{context}",
-                expected_key="tutorial",
-                max_tokens=3200,
-            )
-            artifact = self._tutorials({"tutorials": [data.get("tutorial")]}, [title])
-            if not artifact:
-                raise CourseGenerationError(f"Tutorial compiler could not complete ‘{title}’. Please retry the class workspace.")
-            tutorials.extend(artifact)
+        """Materialise the approved plan without making a class depend on LLM JSON.
 
-        assignments: list[Assignment] = []
-        for title in plan.assignment_titles:
-            data = await self.json(
-                "Create exactly ONE learner-facing practical assignment. Output JSON {assignment:{title,prompt,deliverable,rubric}}. "
-                "Make the prompt a realistic scoped scenario with explicit constraints; include a concrete deliverable and 3–5 measurable rubric items. Do not use placeholders.",
-                f"Requested assignment title: {title}\n\n{context}",
-                expected_key="assignment",
-                max_tokens=2600,
-            )
-            artifact = self._assignments({"assignments": [data.get("assignment")]}, [title])
-            if not artifact:
-                raise CourseGenerationError(f"Assignment compiler could not complete ‘{title}’. Please retry the class workspace.")
-            assignments.extend(artifact)
-
-        data = await self.json(
-            "Create exactly ONE class project. Output JSON {project:{title,brief,milestones,success_criteria}}. "
-            "The project must advance the course capstone, have a concrete brief, 3–6 actionable milestones, and at least 3 measurable success criteria. Do not use placeholders.",
-            f"Requested project title: {plan.project_title}\n\n{context}",
-            expected_key="project",
-            max_tokens=2600,
-        )
-        project = self._project(data, plan.project_title)
-        if project is None:
-            raise CourseGenerationError(f"Project compiler could not complete ‘{plan.project_title}’. Please retry the class workspace.")
+        The plan itself is LLM/research informed and validated before it reaches
+        this point. Rendering it deterministically gives the learner an
+        immediately usable, distinct workspace even when the configured model
+        is unavailable, slow, or emits malformed structured output. The class
+        tutor remains the model-driven path for explanation and feedback.
+        """
+        tutorials = [self._structured_tutorial(title, plan, index) for index, title in enumerate(plan.tutorial_titles)]
+        assignments = [self._structured_assignment(title, proposal, plan) for title in plan.assignment_titles]
+        project = self._structured_project(proposal, plan)
         return tutorials, assignments, project
 
     @staticmethod
-    def _artifact_context(proposal: CourseProposal, plan: CourseClassPlan, resource_evidence: str) -> str:
-        return (
-            f"Course: {proposal.title}\nCapstone: {proposal.capstone_title}\n"
-            f"Class: {plan.title}\nSummary: {plan.summary}\n"
-            f"Learning objectives: {plan.learning_objectives}\n"
-            f"Knowledge points: {plan.knowledge_points}\n"
-            f"Relevant researched resource excerpts:\n{_clip(resource_evidence, 4000) or '(No matching custom resource excerpts.)'}"
+    def _structured_tutorial(title: str, plan: CourseClassPlan, index: int) -> Tutorial:
+        objectives = plan.learning_objectives or ["Demonstrate the class outcome"]
+        primary = objectives[index % len(objectives)]
+        secondary = objectives[(index + 1) % len(objectives)] if len(objectives) > 1 else primary
+        steps = [
+            f"**Define success.** Restate the target in your own words: _{primary}_. Write down the observable result that would prove it.",
+            f"**Prepare a small working slice.** Create the smallest example, screen, data set, or exercise that lets you practice _{primary}_ without adding unrelated scope.",
+            f"**Implement deliberately.** Work through **{title}** and narrate the decision behind each important change. Use the linked class resources as reference material, not as instructions to copy blindly.",
+            f"**Verify the behavior.** Test the happy path and one realistic failure or edge case. Capture the evidence you would show a reviewer.",
+            f"**Connect the ideas.** Explain how the result also supports _{secondary}_, then record one trade-off or question for the tutor.",
+        ]
+        checks = "\n".join(f"- Can you explain how your work demonstrates **{objective}**?" for objective in objectives[:3])
+        content = (
+            f"# {title}\n\n"
+            f"## Outcome\n{plan.summary}\n\n"
+            "## Before you begin\n"
+            f"- Primary mastery target: **{primary}**\n"
+            "- Keep a short evidence log: commands/actions taken, result, and one decision you made.\n"
+            "- Open the class resources alongside this tutorial when you need authoritative reference details.\n\n"
+            "## Hands-on workflow\n"
+            + "\n".join(f"{number}. {step}" for number, step in enumerate(steps, 1))
+            + f"\n\n## Concrete example\nApply this workflow to a focused slice of the class project: **{plan.project_title}**. Start with one behavior that can be demonstrated end to end before broadening the implementation.\n\n"
+            f"## Check your understanding\n{checks}\n\n"
+            "## Next action\nSave your evidence in class notes, complete the related assignment, then ask the adaptive tutor to review your reasoning or run a mastery check."
         )
+        return Tutorial(title=title, content=content, estimated_minutes=max(20, 25 + index * 5))
 
     @staticmethod
-    def _tutorials(data: dict[str, Any], requested_titles: list[str]) -> list[Tutorial]:
-        raw_items = data.get("tutorials") if isinstance(data.get("tutorials"), list) else []
-        tutorials: list[Tutorial] = []
-        remaining = [item for item in raw_items if isinstance(item, dict)]
-        for requested_title in requested_titles:
-            match = next((index for index, item in enumerate(remaining) if _clip(item.get("title"), 160).casefold() == requested_title.casefold()), 0)
-            if not remaining:
-                break
-            raw = remaining.pop(match)
-            content = _clip(raw.get("content"), 10000)
-            title = _clip(raw.get("title") or requested_title, 160)
-            if len(content) < 300 or not title:
-                continue
-            try:
-                minutes = max(5, min(180, int(raw.get("estimated_minutes", 25))))
-            except (TypeError, ValueError):
-                minutes = 25
-            tutorials.append(Tutorial(title=title, content=content, estimated_minutes=minutes))
-        return tutorials
-
-    @staticmethod
-    def _assignments(data: dict[str, Any], requested_titles: list[str]) -> list[Assignment]:
-        raw_items = data.get("assignments") if isinstance(data.get("assignments"), list) else []
-        assignments: list[Assignment] = []
-        remaining = [item for item in raw_items if isinstance(item, dict)]
-        for requested_title in requested_titles:
-            match = next((index for index, item in enumerate(remaining) if _clip(item.get("title"), 160).casefold() == requested_title.casefold()), 0)
-            if not remaining:
-                break
-            raw = remaining.pop(match)
-            title = _clip(raw.get("title") or requested_title, 160)
-            prompt = _clip(raw.get("prompt"), 8000)
-            deliverable = _clip(raw.get("deliverable"), 2000)
-            rubric = _strings(raw.get("rubric"), limit=5, item_limit=350)
-            if not title or len(prompt) < 80 or len(deliverable) < 30 or len(rubric) < 3:
-                continue
-            assignments.append(Assignment(title=title, prompt=prompt, deliverable=deliverable, rubric=rubric))
-        return assignments
-
-    @staticmethod
-    def _project(data: dict[str, Any], requested_title: str) -> ClassProject | None:
-        raw = data.get("project") if isinstance(data.get("project"), dict) else {}
-        project = ClassProject(
-            title=_clip(raw.get("title") or requested_title, 160),
-            brief=_clip(raw.get("brief"), 5000),
-            milestones=_strings(raw.get("milestones"), limit=6, item_limit=350),
-            success_criteria=_strings(raw.get("success_criteria"), limit=6, item_limit=350),
+    def _structured_assignment(title: str, proposal: CourseProposal, plan: CourseClassPlan) -> Assignment:
+        objectives = plan.learning_objectives or ["Demonstrate the class outcome"]
+        objective_list = "\n".join(f"- {objective}" for objective in objectives)
+        prompt = (
+            f"## Scenario\nYou are building toward the course capstone, **{proposal.capstone_title or plan.project_title}**. "
+            f"Complete a focused, reviewable increment for this class: **{title}**.\n\n"
+            f"## Required outcome\n{plan.summary}\n\n"
+            f"## What to demonstrate\n{objective_list}\n\n"
+            "## Constraints\n- Keep the work small enough to verify in one sitting.\n- Make your implementation or analysis reproducible.\n- Include one boundary case, failure mode, or trade-off—not only the happy path.\n- Use linked resources to verify facts and APIs; explain any intentional deviation."
         )
-        if len(project.brief) < 80 or len(project.milestones) < 3 or len(project.success_criteria) < 3:
-            return None
-        return project
+        deliverable = (
+            "Submit a runnable or inspectable artifact (implementation, diagram, migration, test, or structured analysis), "
+            "a short evidence log showing how you verified it, and a concise reflection connecting the result to the listed objectives."
+        )
+        rubric = [
+            f"Demonstrates the class outcome: {objectives[0]}",
+            "Produces a concrete, inspectable artifact rather than a high-level description",
+            "Shows verification of both the intended behavior and an edge case or failure mode",
+            "Explains key technical or design choices and one trade-off",
+        ]
+        return Assignment(title=title, prompt=prompt, deliverable=deliverable, rubric=rubric)
+
+    @staticmethod
+    def _structured_project(proposal: CourseProposal, plan: CourseClassPlan) -> ClassProject:
+        objectives = plan.learning_objectives or ["Demonstrate the class outcome"]
+        milestones = [
+            f"Define the vertical slice: identify the smallest project behavior that demonstrates {objectives[0]}.",
+            f"Build the slice: implement or document the behavior with the relevant tools and class resources.",
+            "Verify it: exercise the intended path plus one edge case, then preserve the evidence.",
+            "Reflect and connect: explain how this increment advances the capstone and what should be improved next.",
+        ]
+        criteria = [
+            f"The project increment demonstrably supports: {objective}" for objective in objectives[:3]
+        ]
+        criteria.extend([
+            "The result is reproducible or inspectable by another learner",
+            "Verification evidence and a meaningful trade-off are recorded",
+        ])
+        return ClassProject(
+            title=plan.project_title,
+            brief=(
+                f"Build a focused increment of **{proposal.capstone_title or plan.project_title}** using this class’s outcome: {plan.summary} "
+                "This is a real project workspace: keep the scope narrow, preserve evidence, and use the tutor for a review before moving on."
+            ),
+            milestones=milestones,
+            success_criteria=criteria[:6],
+        )

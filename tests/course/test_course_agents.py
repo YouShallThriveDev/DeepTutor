@@ -30,31 +30,23 @@ async def test_planner_requires_distinct_complete_class_plans():
 
 
 @pytest.mark.asyncio
-async def test_compiler_rejects_placeholder_content():
+async def test_compiler_materialises_distinct_workspaces_without_waiting_for_llm_json():
     agent = CourseClassCompilerAgent()
-    agent.json = AsyncMock(return_value={"tutorial": {"title": "One", "content": "too short"}})
-    plan = CourseClassPlan(title="Specific class", summary="A class", learning_objectives=["One", "Two"], tutorial_titles=["One", "Two"], assignment_titles=["Practice"], project_title="Project")
+    plan = CourseClassPlan(
+        title="Project setup",
+        summary="Set up a Laravel, Inertia, and Vue application with a verified local workflow.",
+        learning_objectives=["Create the application skeleton", "Verify the local development workflow"],
+        tutorial_titles=["Bootstrap Laravel with Inertia", "Configure a local database"],
+        assignment_titles=["Create the project skeleton"],
+        project_title="Project management foundation",
+    )
+    tutorials, assignments, project = await agent.process(
+        CourseProposal(title="Laravel and Vue", capstone_title="Project manager"), plan, ""
+    )
 
-    with pytest.raises(CourseGenerationError, match="Tutorial compiler could not complete"):
-        await agent.process(CourseProposal(title="Test"), plan, "")
-
-
-@pytest.mark.asyncio
-async def test_compiler_generates_each_artifact_in_an_independent_bounded_call():
-    agent = CourseClassCompilerAgent()
-    content = "# Do the work\n\n" + ("Use the concrete setup steps and verify each result. " * 12)
-    assignment = {"title": "Practice", "prompt": "Build and explain a realistic implementation with explicit technical constraints and verification steps.", "deliverable": "A runnable implementation plus a concise explanation of the design choices.", "rubric": ["Works end to end", "Explains choices", "Verifies the result"]}
-    project = {"title": "Project", "brief": "Build a small, working increment that uses the class objectives and can be reviewed against concrete behavior.", "milestones": ["Plan the increment", "Implement the behavior", "Verify and reflect"], "success_criteria": ["Feature works", "Tests or verification are present", "Tradeoffs are explained"]}
-    agent.json = AsyncMock(side_effect=[
-        {"tutorial": {"title": "First", "content": content, "estimated_minutes": 20}},
-        {"tutorial": {"title": "Second", "content": content, "estimated_minutes": 25}},
-        {"assignment": assignment},
-        {"project": project},
-    ])
-    plan = CourseClassPlan(title="Specific class", summary="A class", learning_objectives=["One", "Two"], tutorial_titles=["First", "Second"], assignment_titles=["Practice"], project_title="Project")
-
-    tutorials, assignments, generated_project = await agent.process(CourseProposal(title="Test"), plan, "")
-    assert [item.title for item in tutorials] == ["First", "Second"]
-    assert assignments[0].title == "Practice"
-    assert generated_project.title == "Project"
-    assert agent.json.await_count == 4
+    assert len(tutorials) == 2
+    assert "Hands-on workflow" in tutorials[0].content
+    assert "Create the application skeleton" in tutorials[0].content
+    assert assignments[0].rubric and len(assignments[0].rubric) >= 3
+    assert len(project.milestones) >= 3
+    assert "Project manager" in project.brief
