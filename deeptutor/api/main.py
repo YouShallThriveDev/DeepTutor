@@ -312,6 +312,7 @@ from deeptutor.api.routers import (
     capabilities_settings,
     chat,
     co_writer,
+    course,
     dashboard,
     imports,
     knowledge,
@@ -382,6 +383,7 @@ app.include_router(
     notebook.router, prefix="/api/v1/notebook", tags=["notebook"], dependencies=_auth
 )
 app.include_router(book.router, prefix="/api/v1/book", tags=["book"], dependencies=_auth)
+app.include_router(course.router, prefix="/api/v1/course", tags=["course"], dependencies=_auth)
 app.include_router(memory.router, prefix="/api/v1/memory", tags=["memory"], dependencies=_auth)
 app.include_router(
     capabilities_settings.router,

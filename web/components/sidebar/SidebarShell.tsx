@@ -12,6 +12,7 @@ import {
   Brain,
   ChevronDown,
   Github,
+  GraduationCap,
   HeartHandshake,
   House,
   LayoutGrid,
@@ -77,6 +78,13 @@ const PRIMARY_NAV: NavEntry[] = [
     label: "Book",
     icon: Library,
     tooltipKey: "Book tooltip",
+    requires: "llm",
+  },
+  {
+    href: "/courses",
+    label: "Courses",
+    icon: GraduationCap,
+    tooltipKey: "Courses tooltip",
     requires: "llm",
   },
   {

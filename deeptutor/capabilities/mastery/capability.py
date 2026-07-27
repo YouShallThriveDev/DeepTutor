@@ -39,7 +39,11 @@ def resolve_mastery_path_id(context: UnifiedContext) -> str:
     and the build wizard / dashboard agree on one storage key), then a book
     reference, then the session id for an ad-hoc path built inside a chat.
     """
-    explicit = str(context.metadata.get("mastery_path_id") or "").strip()
+    explicit = str(
+        context.metadata.get("mastery_path_id")
+        or context.config_overrides.get("mastery_path_id")
+        or ""
+    ).strip()
     if explicit:
         return _sanitize_path_id(explicit)
     refs = (context.metadata or {}).get("book_references", [])
