@@ -182,17 +182,54 @@ class CourseClassCompilerAgent(_CourseAgent):
             expected_key="tutorials",
             max_tokens=9000,
         )
-        raw_tutorials = data.get("tutorials") if isinstance(data.get("tutorials"), list) else []
-        raw_assignments = data.get("assignments") if isinstance(data.get("assignments"), list) else []
-        raw_project = data.get("project") if isinstance(data.get("project"), dict) else {}
-        if len(raw_tutorials) < len(plan.tutorial_titles) or len(raw_assignments) < len(plan.assignment_titles):
-            raise CourseGenerationError(f"Class compiler did not return every requested artifact for ‘{plan.title}’. Please retry.")
+        tutorials = self._tutorials(data, plan.tutorial_titles)
+        assignments = self._assignments(data, plan.assignment_titles)
+        project = self._project(data, plan.project_title)
+
+        # Reasoning models occasionally finish a valid first artifact but run
+        # out of visible output before the remaining JSON. Preserve the valid
+        # work and make a small, explicit recovery call for only what is
+        # missing; never substitute generic shells.
+        missing_tutorials = plan.tutorial_titles[len(tutorials):]
+        missing_assignments = plan.assignment_titles[len(assignments):]
+        if missing_tutorials or missing_assignments or project is None:
+            expected_key = "tutorials" if missing_tutorials else ("assignments" if missing_assignments else "project")
+            repair = await self.json(
+                "Finish only the missing learner-facing artifacts for this already-approved class. Output JSON with tutorials, assignments, and project keys. "
+                f"Return one complete tutorial for every requested missing tutorial title: {missing_tutorials or 'none'}. "
+                f"Return one complete assignment for every requested missing assignment title: {missing_assignments or 'none'}. "
+                f"Return a complete project only when requested: {'yes' if project is None else 'no'}. "
+                "Tutorial content must include orientation, numbered hands-on steps, a concrete example, a check-for-understanding, and a next action. Assignments need prompt, deliverable, and at least three rubric items. Do not repeat already completed artifacts or use placeholders.",
+                f"Course: {proposal.title}\nClass plan:\n{plan.model_dump_json(indent=2)}\nAlready completed tutorial titles: {[item.title for item in tutorials]}\nAlready completed assignment titles: {[item.title for item in assignments]}\nRelevant resource evidence:\n{_clip(resource_evidence, 4500)}",
+                expected_key=expected_key,
+                max_tokens=6500,
+            )
+            if missing_tutorials:
+                tutorials.extend(self._tutorials(repair, missing_tutorials))
+            if missing_assignments:
+                assignments.extend(self._assignments(repair, missing_assignments))
+            repaired_project = self._project(repair, plan.project_title)
+            if project is None and repaired_project is not None:
+                project = repaired_project
+
+        if len(tutorials) != len(plan.tutorial_titles) or len(assignments) != len(plan.assignment_titles) or project is None:
+            raise CourseGenerationError(
+                f"Class compiler could not finish every artifact for ‘{plan.title}’. Please retry the class workspace."
+            )
+        return tutorials, assignments, project
+
+    @staticmethod
+    def _tutorials(data: dict[str, Any], requested_titles: list[str]) -> list[Tutorial]:
+        raw_items = data.get("tutorials") if isinstance(data.get("tutorials"), list) else []
         tutorials: list[Tutorial] = []
-        for index, raw in enumerate(raw_tutorials[:len(plan.tutorial_titles)]):
-            if not isinstance(raw, dict):
-                continue
+        remaining = [item for item in raw_items if isinstance(item, dict)]
+        for requested_title in requested_titles:
+            match = next((index for index, item in enumerate(remaining) if _clip(item.get("title"), 160).casefold() == requested_title.casefold()), 0)
+            if not remaining:
+                break
+            raw = remaining.pop(match)
             content = _clip(raw.get("content"), 10000)
-            title = _clip(raw.get("title") or plan.tutorial_titles[index], 160)
+            title = _clip(raw.get("title") or requested_title, 160)
             if len(content) < 300 or not title:
                 continue
             try:
@@ -200,23 +237,36 @@ class CourseClassCompilerAgent(_CourseAgent):
             except (TypeError, ValueError):
                 minutes = 25
             tutorials.append(Tutorial(title=title, content=content, estimated_minutes=minutes))
+        return tutorials
+
+    @staticmethod
+    def _assignments(data: dict[str, Any], requested_titles: list[str]) -> list[Assignment]:
+        raw_items = data.get("assignments") if isinstance(data.get("assignments"), list) else []
         assignments: list[Assignment] = []
-        for index, raw in enumerate(raw_assignments[:len(plan.assignment_titles)]):
-            if not isinstance(raw, dict):
-                continue
-            title = _clip(raw.get("title") or plan.assignment_titles[index], 160)
+        remaining = [item for item in raw_items if isinstance(item, dict)]
+        for requested_title in requested_titles:
+            match = next((index for index, item in enumerate(remaining) if _clip(item.get("title"), 160).casefold() == requested_title.casefold()), 0)
+            if not remaining:
+                break
+            raw = remaining.pop(match)
+            title = _clip(raw.get("title") or requested_title, 160)
             prompt = _clip(raw.get("prompt"), 8000)
             deliverable = _clip(raw.get("deliverable"), 2000)
             rubric = _strings(raw.get("rubric"), limit=5, item_limit=350)
             if not title or len(prompt) < 80 or len(deliverable) < 30 or len(rubric) < 3:
                 continue
             assignments.append(Assignment(title=title, prompt=prompt, deliverable=deliverable, rubric=rubric))
+        return assignments
+
+    @staticmethod
+    def _project(data: dict[str, Any], requested_title: str) -> ClassProject | None:
+        raw = data.get("project") if isinstance(data.get("project"), dict) else {}
         project = ClassProject(
-            title=_clip(raw_project.get("title") or plan.project_title, 160),
-            brief=_clip(raw_project.get("brief"), 5000),
-            milestones=_strings(raw_project.get("milestones"), limit=6, item_limit=350),
-            success_criteria=_strings(raw_project.get("success_criteria"), limit=6, item_limit=350),
+            title=_clip(raw.get("title") or requested_title, 160),
+            brief=_clip(raw.get("brief"), 5000),
+            milestones=_strings(raw.get("milestones"), limit=6, item_limit=350),
+            success_criteria=_strings(raw.get("success_criteria"), limit=6, item_limit=350),
         )
-        if len(tutorials) != len(plan.tutorial_titles) or len(assignments) != len(plan.assignment_titles) or len(project.brief) < 80 or len(project.milestones) < 3 or len(project.success_criteria) < 3:
-            raise CourseGenerationError(f"Class compiler returned incomplete content for ‘{plan.title}’. Please retry.")
-        return tutorials, assignments, project
+        if len(project.brief) < 80 or len(project.milestones) < 3 or len(project.success_criteria) < 3:
+            return None
+        return project
