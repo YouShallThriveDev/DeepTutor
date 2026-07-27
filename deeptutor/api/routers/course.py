@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 
 from deeptutor.course import CourseOutline, CourseProposal, get_course_engine
@@ -121,3 +121,66 @@ async def delete_course(course_id: str) -> dict[str, Any]:
     if not get_course_engine().delete_course(course_id):
         raise HTTPException(status_code=404, detail="Course not found")
     return {"deleted": True, "course_id": course_id}
+
+
+@router.websocket("/ws")
+async def course_websocket(ws: WebSocket) -> None:
+    """Long-running course research/planning operations.
+
+    Course creation can include URL fetches and two LLM passes, so it must not
+    travel through the frontend's short-lived HTTP rewrite connection.
+    """
+    from deeptutor.api.routers.auth import ws_auth_failed, ws_require_auth
+    from deeptutor.multi_user.context import reset_current_user
+
+    user_token = await ws_require_auth(ws)
+    if user_token is ws_auth_failed:
+        return
+    await ws.accept()
+    try:
+        while True:
+            try:
+                data = await ws.receive_json()
+            except WebSocketDisconnect:
+                break
+            except Exception as exc:
+                await ws.send_json({"type": "error", "content": f"Bad message: {exc}"})
+                continue
+            action = str(data.get("type") or "")
+            try:
+                if action == "create":
+                    body = CreateCourseRequest.model_validate(data)
+                    course, proposal, inputs = await get_course_engine().create_course(
+                        **body.model_dump()
+                    )
+                    await ws.send_json({
+                        "type": "create_result",
+                        "course": course.model_dump(mode="json"),
+                        "proposal": proposal.model_dump(mode="json"),
+                        "research_brief": inputs.research_brief,
+                        "resource_links": [item.model_dump(mode="json") for item in inputs.resource_links],
+                    })
+                elif action == "confirm_proposal":
+                    proposal = CourseProposal.model_validate(data["proposal"]) if data.get("proposal") else None
+                    course, outline = await get_course_engine().confirm_proposal(
+                        str(data.get("course_id") or ""), proposal
+                    )
+                    await ws.send_json({
+                        "type": "confirm_proposal_result",
+                        "course": course.model_dump(mode="json"),
+                        "outline": outline.model_dump(mode="json"),
+                    })
+                else:
+                    await ws.send_json({"type": "error", "content": f"Unknown message type: {action}"})
+            except Exception as exc:
+                await ws.send_json({"type": "error", "content": str(exc)})
+    finally:
+        try:
+            await ws.close()
+        except Exception:
+            pass
+        if user_token is not None:
+            try:
+                reset_current_user(user_token)
+            except Exception:
+                pass
