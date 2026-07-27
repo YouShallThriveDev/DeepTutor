@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from typing import Any
 
 from deeptutor.book.blocks._llm_writer import llm_json
@@ -17,6 +18,11 @@ logger = logging.getLogger(__name__)
 COURSE_COMPILER_MODEL = os.getenv("DEEPTUTOR_COURSE_COMPILER_MODEL", "x-ai/grok-4.5")
 COURSE_COMPILER_BINDING = os.getenv("DEEPTUTOR_COURSE_COMPILER_BINDING", "openrouter")
 COURSE_COMPILER_REASONING_EFFORT = os.getenv("DEEPTUTOR_COURSE_COMPILER_REASONING_EFFORT", "low")
+
+
+def _escape_invalid_json_backslashes(value: str) -> str:
+    """Repair markdown-y JSON strings that contain invalid escapes like \\*."""
+    return re.sub(r'\\(?!["\\/bfnrtu])', r'\\\\', value)
 
 
 class CourseGenerationError(ValueError):
@@ -235,11 +241,16 @@ class CourseClassCompilerAgent(_CourseAgent):
             logger.warning("Course compiler %s call failed: %s", model, exc)
             return {}
         cleaned = clean_thinking_tags(raw, binding, model).strip()
-        data = parse_json_response(cleaned, fallback={})
-        if isinstance(data, dict) and data.get(expected_key):
-            return data
-        recovered = parse_json_response(raw, fallback={})
-        return recovered if isinstance(recovered, dict) else {}
+        return self._parse_compiler_payload(cleaned, raw, expected_key=expected_key)
+
+    @staticmethod
+    def _parse_compiler_payload(cleaned: str, raw: str, *, expected_key: str) -> dict[str, Any]:
+        for candidate in (cleaned, raw):
+            for value in (candidate, _escape_invalid_json_backslashes(candidate)):
+                data = parse_json_response(value, fallback={})
+                if isinstance(data, dict) and data.get(expected_key):
+                    return data
+        return {}
 
     async def _enriched_tutorial(self, title: str, context: str) -> Tutorial | None:
         data = await self._compiler_json(
