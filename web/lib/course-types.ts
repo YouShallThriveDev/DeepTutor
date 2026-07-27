@@ -47,4 +47,4 @@ export interface CourseClass {
 }
 export interface Course { id: string; title: string; description: string; status: CourseStatus; proposal: CourseProposal | null; knowledge_bases: string[]; resource_links: ResourceLink[]; language: string; class_count: number; completed_class_count: number; created_at: number; updated_at: number; }
 export interface CourseProgress { course_id: string; current_class_id: string; completed_class_ids: string[]; updated_at: number; }
-export interface CourseDetail { course: Course; outline: CourseOutline | null; classes: CourseClass[]; progress: CourseProgress; }
+export interface CourseDetail { course: Course; outline: CourseOutline | null; classes: CourseClass[]; progress: CourseProgress; research_brief?: string; }

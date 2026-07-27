@@ -33,7 +33,17 @@ export default function CoursesPage() {
   }, []);
   const openCourse = useCallback(async (id: string) => {
     setBusy(true); setError("");
-    try { const next = await courseApi.get(id); setDetail(next); setOutline(next.outline); setView("board"); }
+    try {
+      const next = await courseApi.get(id);
+      setDetail(next); setOutline(next.outline);
+      if (next.course.status === "draft" && next.course.proposal) {
+        setProposal(next.course.proposal); setResearchBrief(next.research_brief || ""); setView("creator");
+      } else if (next.course.status === "outline_ready" && next.outline) {
+        setView("outline");
+      } else {
+        setView("board");
+      }
+    }
     catch (err) { setError(err instanceof Error ? err.message : "Could not open course"); }
     finally { setBusy(false); }
   }, []);

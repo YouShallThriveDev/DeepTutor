@@ -51,11 +51,13 @@ async def get_course(course_id: str) -> dict[str, Any]:
     if not detail:
         raise HTTPException(status_code=404, detail="Course not found")
     course, outline, classes, progress = detail
+    inputs = get_course_engine().storage.load_inputs(course_id)
     return {
         "course": course.model_dump(mode="json"),
         "outline": outline.model_dump(mode="json") if outline else None,
         "classes": [item.model_dump(mode="json") for item in classes],
         "progress": progress.model_dump(mode="json"),
+        "research_brief": inputs.research_brief if inputs else "",
     }
 
 
