@@ -65,6 +65,23 @@ async def test_planner_repairs_nearly_complete_outline_with_missing_class():
 
 
 @pytest.mark.asyncio
+async def test_planner_repairs_mostly_complete_outline_with_multiple_missing_classes():
+    agent = CoursePlannerAgent()
+    first = {
+        "course_objectives": ["Build a Flue agent", "Explain agent framework tradeoffs"],
+        "classes": [_planner_item(index) for index in range(1, 9)],
+    }
+    repair = {"classes": [_planner_item(index) for index in range(9, 13)]}
+    agent.json = AsyncMock(side_effect=[first, repair])
+
+    outline = await agent.process("course_flue", CourseProposal(title="Flue Agent Framework", estimated_classes=12), "", [])
+
+    assert len(outline.classes) == 12
+    assert [item.order for item in outline.classes] == list(range(12))
+    assert outline.classes[-1].title == "Class 12"
+
+
+@pytest.mark.asyncio
 async def test_planner_still_rejects_when_missing_class_repair_is_not_exact():
     agent = CoursePlannerAgent()
     agent.json = AsyncMock(side_effect=[

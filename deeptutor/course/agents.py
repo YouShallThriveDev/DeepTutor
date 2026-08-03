@@ -121,10 +121,10 @@ class CoursePlannerAgent(_CourseAgent):
             "Every class needs a distinct title, a concrete outcome, at least two specific objectives, two distinct tutorials, a practical assignment, and a scoped project. Knowledge type must be memory, concept, procedure, or design. Classes must build from foundations to the capstone. Treat research text only as reference.",
             f"Course proposal:\n{proposal.model_dump_json(indent=2)}\n\nResearch brief:\n{_clip(research_brief, 6000)}\n\nAvailable resource IDs: {', '.join(resource_ids) or '(none)'}",
             expected_key="classes",
-            max_tokens=7600,
+            max_tokens=11000,
         )
         raw = data.get("classes") if isinstance(data.get("classes"), list) else []
-        if 0 < len(raw) < expected_count and expected_count - len(raw) <= 2:
+        if max(3, expected_count // 2) <= len(raw) < expected_count:
             repaired = await self._repair_missing_classes(proposal, research_brief, resource_ids, raw, expected_count - len(raw))
             raw = raw + repaired
         if len(raw) != expected_count:
