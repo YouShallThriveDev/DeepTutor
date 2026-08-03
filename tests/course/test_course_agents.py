@@ -29,6 +29,52 @@ async def test_planner_requires_distinct_complete_class_plans():
     assert outline.classes[1].prerequisites == [outline.classes[0].id]
 
 
+
+
+def _planner_item(index: int, title: str | None = None) -> dict:
+    label = title or f"Class {index}"
+    previous = [] if index <= 1 else [f"Class {index - 1}"]
+    return {
+        "title": label,
+        "summary": f"Build a concrete agent framework capability in step {index} with working implementation and review checkpoints.",
+        "learning_objectives": [f"Explain capability {index}", f"Implement capability {index}"],
+        "knowledge_points": [{"name": f"Capability {index}", "type": "concept"}],
+        "prerequisites": previous,
+        "tutorial_titles": [f"Explore capability {index}", f"Implement capability {index}"],
+        "assignment_titles": [f"Practice capability {index}"],
+        "project_title": f"Agent framework milestone {index}",
+        "resource_ids": [],
+    }
+
+
+@pytest.mark.asyncio
+async def test_planner_repairs_nearly_complete_outline_with_missing_class():
+    agent = CoursePlannerAgent()
+    first = {
+        "course_objectives": ["Build a Flue agent", "Explain agent framework tradeoffs"],
+        "classes": [_planner_item(index) for index in range(1, 12)],
+    }
+    repair = {"classes": [_planner_item(12, "Capstone Integration and Production Readiness")]}
+    agent.json = AsyncMock(side_effect=[first, repair])
+
+    outline = await agent.process("course_flue", CourseProposal(title="Flue Agent Framework", estimated_classes=12), "", [])
+
+    assert len(outline.classes) == 12
+    assert outline.classes[-1].title == "Capstone Integration and Production Readiness"
+    assert agent.json.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_planner_still_rejects_when_missing_class_repair_is_not_exact():
+    agent = CoursePlannerAgent()
+    agent.json = AsyncMock(side_effect=[
+        {"course_objectives": ["Build a Flue agent", "Explain agent framework tradeoffs"], "classes": [_planner_item(index) for index in range(1, 12)]},
+        {"classes": []},
+    ])
+
+    with pytest.raises(CourseGenerationError, match="required"):
+        await agent.process("course_flue", CourseProposal(title="Flue Agent Framework", estimated_classes=12), "", [])
+
 @pytest.mark.asyncio
 async def test_compiler_materialises_distinct_workspaces_without_waiting_for_llm_json():
     agent = CourseClassCompilerAgent()

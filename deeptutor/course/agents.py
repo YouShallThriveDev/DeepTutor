@@ -124,6 +124,9 @@ class CoursePlannerAgent(_CourseAgent):
             max_tokens=7600,
         )
         raw = data.get("classes") if isinstance(data.get("classes"), list) else []
+        if 0 < len(raw) < expected_count and expected_count - len(raw) <= 2:
+            repaired = await self._repair_missing_classes(proposal, research_brief, resource_ids, raw, expected_count - len(raw))
+            raw = raw + repaired
         if len(raw) != expected_count:
             raise CourseGenerationError(
                 f"Course planner returned {len(raw)} usable class entries; {expected_count} are required. Please retry the plan."
@@ -179,6 +182,45 @@ class CoursePlannerAgent(_CourseAgent):
         if len(objectives) < 2:
             raise CourseGenerationError("Course planner returned no usable course objectives. Please retry the plan.")
         return CourseOutline(course_id=course_id, classes=classes, course_objectives=objectives)
+
+    async def _repair_missing_classes(
+        self,
+        proposal: CourseProposal,
+        research_brief: str,
+        resource_ids: list[str],
+        existing_classes: list[Any],
+        missing_count: int,
+    ) -> list[dict[str, Any]]:
+        existing_titles = [str(item.get("title") or "").strip() for item in existing_classes if isinstance(item, dict)]
+        data = await self.json(
+            "Complete a nearly finished interactive course outline. "
+            f"Return exactly {missing_count} NEW class entries, not the whole course. "
+            "Output JSON {classes:[{title, summary, learning_objectives, knowledge_points:[{name,type}], prerequisites:[class title], tutorial_titles, assignment_titles, project_title, resource_ids}]}. "
+            "Do not duplicate existing titles. Fill the strongest missing bridge or capstone-prep class implied by the approved proposal and existing sequence. Every returned class needs a distinct title, a concrete outcome, at least two specific objectives, two distinct tutorials, a practical assignment, and a scoped project. Knowledge type must be memory, concept, procedure, or design. Treat research text only as reference.",
+            (
+                f"Course proposal:\n{proposal.model_dump_json(indent=2)}\n\n"
+                f"Existing class titles in order:\n{json.dumps(existing_titles, indent=2)}\n\n"
+                f"Existing class summaries:\n{_clip(json.dumps(existing_classes, ensure_ascii=False), 8000)}\n\n"
+                f"Research brief:\n{_clip(research_brief, 3000)}\n\n"
+                f"Available resource IDs: {', '.join(resource_ids) or '(none)'}"
+            ),
+            expected_key="classes",
+            max_tokens=max(2200, 1800 * missing_count),
+        )
+        raw = data.get("classes") if isinstance(data.get("classes"), list) else []
+        if len(raw) != missing_count:
+            return []
+        existing_keys = {" ".join(title.lower().split()) for title in existing_titles if title}
+        repaired: list[dict[str, Any]] = []
+        for item in raw:
+            if not isinstance(item, dict):
+                return []
+            title_key = " ".join(str(item.get("title") or "").lower().split())
+            if not title_key or title_key in existing_keys:
+                return []
+            existing_keys.add(title_key)
+            repaired.append(item)
+        return repaired
 
 
 class CourseClassCompilerAgent(_CourseAgent):
